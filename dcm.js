@@ -9,18 +9,28 @@ vm.runInThisContext(fs.readFileSync('./dist/jpx.js', 'utf8') + '');
 
 var filename = "test";
 var lossless = 0;
-
+var t1 = Date.now();
     //load dicom file using
     var dicomFileAsBuffer = fs.readFileSync('./' + filename + '.dcm');
     var dicomFileAsByteArray = new Uint8Array(dicomFileAsBuffer);
     var dataSet = dicomParser.parseDicom(dicomFileAsByteArray);
     var patientName = dataSet.string('x00100010');
+    
+    var options = { omitPrivateAttibutes :false , maxElementLength: 128 };
+    var instance = dicomParser.explicitDataSetToJS(dataSet, options);
+    var bitsAllocated = instance.x00280101; //uint8 or uint16 -> 8 or 16
+    var rows = instance.x00280010;
+    var columns = instance.x00280011;
+    console.log('bitsAllocated: ', bitsAllocated, 'rows: ', rows, 'columns', columns);
 //console.log(dataSet);
 
-var xyzImagePositionPatient = readMultiframeImagePositionPatient(dataSet);
+//isValidRxDicom(dataSet);
+
+if (isEnhancedCT(dataSet))
+    readMultiframeImagePositionPatient(dataSet);
 
     //Extract embedded JPEG2000 stream
-    var imageBaseOffset = dataSet.elements.x7fe00010.dataOffset + 16;
+//var imageBaseOffset = dataSet.elements.x7fe00010.dataOffset + 16;
 var H = dataSet.elements.x7fe00010;
 //console.log(H);
 //    var layer1 = dataSet.uint32('x00691012');
@@ -28,13 +38,14 @@ var H = dataSet.elements.x7fe00010;
 //    var layer3 = dataSet.uint32('x00691014');
 //console.log(layer3);
 var jpxDataAll = [];
+var numFrames = H.fragments.length;
 for(var i = 0; i < H.fragments.length; i++){
     jpxDataAll.push(dicomFileAsByteArray.subarray(H.fragments[i].position,H.fragments[i].position+H.fragments[i].length));
 }
 // var jpxData = dicomFileAsByteArray.subarray(H.fragments[0].position,H.fragments[0].position+H.fragments[0].length); //, H.fragments[0].length);
-var decodedPixelDataAll = new Uint16Array(512*512*207);
+var decodedPixelDataAll = new Uint16Array(rows*columns*numFrames);
 var timeTotal=0;
-for(var j = 0; j < 207; j++){
+for(var j = 0; j < numFrames; j++){
     var jpxData = jpxDataAll[j];
     //console.log(jpxData.length);
     //console.log(H.fragments);
@@ -44,8 +55,8 @@ for(var j = 0; j < 207; j++){
         jpxImage.parse(jpxData);
     //console.log(jpxImage);
         var endTime = Date.now();
-        var componentsCount = jpxImage.componentsCount;
-        var tileCount = jpxImage.tiles.length;
+        //var componentsCount = jpxImage.componentsCount;
+        //var tileCount = jpxImage.tiles.length;
         var tileComponents = jpxImage.tiles[0];
         var decodedPixelData = tileComponents.items;
         var height = jpxImage.height;
@@ -55,39 +66,63 @@ for(var j = 0; j < 207; j++){
         // decodedPixelDataAll.push(decodedPixelData);
         decodedPixelDataAll.set(decodedPixelData, j*height*width);
 }
-console.log('time total',timeTotal/1000);
-componentsCount = 207;
+var t2 = Date.now();
+console.log('time for decompression total',timeTotal/1000, 'seconds');
+console.log('time loading + decompression total',(t2-t1)/1000, 'seconds');
     //load reference raw file
     var referenceFileAsBuffer = fs.readFileSync('./' + filename + '.raw');
-    console.log(referenceFileAsBuffer.length);
+    console.log('Raw image buffer length (bytes): ', referenceFileAsBuffer.length);
     //compare pixel by pixel
     var numDiff = 0;
     var cumDiff = 0;
     var maxErr = 0;
-    for (var i = 0; i < height * width * componentsCount; i++) {
-        referenceValue = referenceFileAsBuffer.readInt16LE(i * 2);
-        if (Math.abs(referenceValue - decodedPixelDataAll[i]) > 0) {
-            numDiff++;
-            cumDiff += Math.pow(referenceValue - decodedPixelDataAll[i], 2);
-            if (Math.abs(referenceValue - decodedPixelDataAll[i]) > maxErr) {
-                maxErr = Math.abs(referenceValue - decodedPixelDataAll[i]);
+    if (bitsAllocated == '16'){
+        for (var i = 0; i < height * width * numFrames; i++) {
+            referenceValue = referenceFileAsBuffer.readInt16LE(i * 2);
+            if (Math.abs(referenceValue - decodedPixelDataAll[i]) > 0) {
+                numDiff++;
+                cumDiff += Math.pow(referenceValue - decodedPixelDataAll[i], 2);
+                if (Math.abs(referenceValue - decodedPixelDataAll[i]) > maxErr) {
+                    maxErr = Math.abs(referenceValue - decodedPixelDataAll[i]);
+                }
             }
         }
-    }
 
-    if (true) {
-        var buf = new Buffer(height * width * 2 * componentsCount);
-        for (var i = 0; i < height * width * componentsCount; i++) {
-            buf.writeInt16LE(decodedPixelDataAll[i], i * 2);
+        if (true) {
+            var buf = new Buffer(height * width * 2 * numFrames);
+            for (var i = 0; i < height * width * numFrames; i++) {
+                buf.writeInt16LE(decodedPixelDataAll[i], i * 2);
+            }
+            fs.writeFileSync('./test/out_' + filename + '.raw', buf);
         }
-        fs.writeFileSync('./test/out_' + filename + '.raw', buf);
+    }
+    else{
+        for (var i = 0; i < height * width * numFrames; i++) {
+        referenceValue = referenceFileAsBuffer.readInt8(i);
+            if (Math.abs(referenceValue - decodedPixelDataAll[i]) > 0) {
+                numDiff++;
+                cumDiff += Math.pow(referenceValue - decodedPixelDataAll[i], 2);
+                if (Math.abs(referenceValue - decodedPixelDataAll[i]) > maxErr) {
+                    maxErr = Math.abs(referenceValue - decodedPixelDataAll[i]);
+                }
+            }
+        }
+
+        if (true) {
+            var buf = new Buffer(height * width * numFrames);
+            for (var i = 0; i < height * width * numFrames; i++) {
+                buf.writeInt8(decodedPixelDataAll[i], i);
+            }
+            fs.writeFileSync('./test/out_' + filename + '.raw', buf);
+        }
     }
 
-    var numSamples = (height * width * componentsCount);
+    var numSamples = (height * width * numFrames);
 
 console.log((lossless ? maxErr === 0 : maxErr <= 1), numDiff + ' / ' + numSamples + ' degraded pixels, MSE=' + cumDiff / numSamples + ' Max err= ' + maxErr)
 
 function readMultiframeImagePositionPatient(dataset) {
+    console.log('--- Enhanced CT Image Storage');
     var options = { omitPrivateAttibutes :false , maxElementLength: 128 };
     var instance = dicomParser.explicitDataSetToJS(dataSet, options);
     var perFrameSeq = instance.x52009230; // PerFrameFunctionalGroupsSequence
@@ -121,8 +156,25 @@ function readMultiframeImagePositionPatient(dataset) {
     dcmColumns = parseFloat(instance.x00280011); //Columns;
     dcmNumFrames = parseFloat(instance.x00280008); //NumberOfFrames;
     xyzSize = [dcmColumns,dcmRows,dcmNumFrames]; // Rows -> y ; Columns -> x;
+    console.log('origin:', originMm, 'xyzSpacing:', xyzPixelSpacing, 'xyzSize:', xyzSize);
     var a = 0;
-    
+}
+
+function isValidRxDicom(dataset) {
+    var TransferSyntaxUID = dataSet.string('x00020010');
+    var SOPClassUID = dataSet.string('x00080016');
+    if(TransferSyntaxUID !== '1.2.840.10008.1.2.4.90') // JPEG 2000 Image Compression (Lossless Only)
+        throw('Unsupported TrasferSyntaxUID found. Aborting!');
+    if(SOPClassUID !== '1.2.840.10008.5.1.4.1.1.2.1') // Enhanced CT Image Storage
+        throw('Unsupported SOPClassUID found. Aborting!');
+};
+
+function isEnhancedCT(dataset){
+    var result = false;
+    var SOPClassUID = dataSet.string('x00080016');
+    if(SOPClassUID === '1.2.840.10008.5.1.4.1.1.2.1') // Enhanced CT Image Storage
+        result = true;
+    return result;
 }
 /**
  * Compute element-to-element difference along the array
