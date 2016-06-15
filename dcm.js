@@ -8,6 +8,10 @@ var dicomParser = require('./node_modules/dicom-parser/dist/dicomParser');
 vm.runInThisContext(fs.readFileSync('./dist/jpx.js', 'utf8') + '');
 
 var filename = "test";
+if (process.argv[2])
+    filename = process.argv[2];
+console.log('filename: ', filename);
+
 var lossless = 0;
 var t1 = Date.now();
     //load dicom file using
