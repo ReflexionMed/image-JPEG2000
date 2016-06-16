@@ -7,7 +7,7 @@ var math = require('mathjs');
 var dicomParser = require('./node_modules/dicom-parser/dist/dicomParser');
 vm.runInThisContext(fs.readFileSync('./dist/jpx.js', 'utf8') + '');
 
-var filename = "test";
+var filename = "ct";
 if (process.argv[2])
     filename = process.argv[2];
 console.log('filename: ', filename);
@@ -18,7 +18,6 @@ var t1 = Date.now();
     var dicomFileAsBuffer = fs.readFileSync('./' + filename + '.dcm');
     var dicomFileAsByteArray = new Uint8Array(dicomFileAsBuffer);
     var dataSet = dicomParser.parseDicom(dicomFileAsByteArray);
-    var patientName = dataSet.string('x00100010');
     
     var options = { omitPrivateAttibutes :false , maxElementLength: 128 };
     var instance = dicomParser.explicitDataSetToJS(dataSet, options);
@@ -26,107 +25,92 @@ var t1 = Date.now();
     var rows = instance.x00280010;
     var columns = instance.x00280011;
     console.log('bitsAllocated: ', bitsAllocated, 'rows: ', rows, 'columns', columns);
-//console.log(dataSet);
 
 //isValidRxDicom(dataSet);
 
-if (isEnhancedCT(dataSet))
-    readMultiframeImagePositionPatient(dataSet);
-
-    //Extract embedded JPEG2000 stream
-//var imageBaseOffset = dataSet.elements.x7fe00010.dataOffset + 16;
-var H = dataSet.elements.x7fe00010;
-//console.log(H);
-//    var layer1 = dataSet.uint32('x00691012');
-//    var layer2 = dataSet.uint32('x00691013');
-//    var layer3 = dataSet.uint32('x00691014');
-//console.log(layer3);
-var jpxDataAll = [];
-var numFrames = H.fragments.length;
-for(var i = 0; i < H.fragments.length; i++){
-    jpxDataAll.push(dicomFileAsByteArray.subarray(H.fragments[i].position,H.fragments[i].position+H.fragments[i].length));
+if (isEnhancedCT(dataSet)){
+    var header = readMultiframeImagePositionPatient(dataSet);
+    console.log('--- Parsing Enhanced CT Image Storage \n', header, '\n ---');
 }
-// var jpxData = dicomFileAsByteArray.subarray(H.fragments[0].position,H.fragments[0].position+H.fragments[0].length); //, H.fragments[0].length);
+
+//Extract embedded JPEG2000 stream
+var framePixelData = dataSet.elements.x7fe00010;
+var jpxDataAll = [];
+var numFrames = framePixelData.fragments.length;
+for(var i = 0; i < framePixelData.fragments.length; i++){
+    jpxDataAll.push(
+            dicomFileAsByteArray.subarray(framePixelData.fragments[i].position,
+                framePixelData.fragments[i].position + 
+                framePixelData.fragments[i].length)
+        );
+}
 var decodedPixelDataAll = new Uint16Array(rows*columns*numFrames);
-var timeTotal=0;
+var timeTotal = 0;
 for(var j = 0; j < numFrames; j++){
     var jpxData = jpxDataAll[j];
-    //console.log(jpxData.length);
-    //console.log(H.fragments);
-        //decode JPEG2000 steam
-        var jpxImage = new global.JpxImage();
-        var startTime = Date.now();
-        jpxImage.parse(jpxData);
-    //console.log(jpxImage);
-        var endTime = Date.now();
-        //var componentsCount = jpxImage.componentsCount;
-        //var tileCount = jpxImage.tiles.length;
-        var tileComponents = jpxImage.tiles[0];
-        var decodedPixelData = tileComponents.items;
-        var height = jpxImage.height;
-        var width = jpxImage.width;
-        var j2kDecodeTime = (endTime - startTime);
-        timeTotal+=j2kDecodeTime;
-        // decodedPixelDataAll.push(decodedPixelData);
-        decodedPixelDataAll.set(decodedPixelData, j*height*width);
+    //decode JPEG2000 steam
+    var jpxImage = new global.JpxImage();
+    var startTime = Date.now();
+    jpxImage.parse(jpxData);
+    var endTime = Date.now();
+    var tileComponents = jpxImage.tiles[0];
+    var decodedPixelData = tileComponents.items;
+    var height = jpxImage.height;
+    var width = jpxImage.width;
+    var j2kDecodeTime = (endTime - startTime);
+    timeTotal += j2kDecodeTime;
+    decodedPixelDataAll.set(decodedPixelData, j*height*width);
 }
 var t2 = Date.now();
-console.log('time for decompression total',timeTotal/1000, 'seconds');
-console.log('time loading + decompression total',(t2-t1)/1000, 'seconds');
-    //load reference raw file
-    var referenceFileAsBuffer = fs.readFileSync('./' + filename + '.raw');
-    console.log('Raw image buffer length (bytes): ', referenceFileAsBuffer.length);
-    //compare pixel by pixel
-    var numDiff = 0;
-    var cumDiff = 0;
-    var maxErr = 0;
-    if (bitsAllocated == '16'){
-        for (var i = 0; i < height * width * numFrames; i++) {
-            referenceValue = referenceFileAsBuffer.readInt16LE(i * 2);
-            if (Math.abs(referenceValue - decodedPixelDataAll[i]) > 0) {
-                numDiff++;
-                cumDiff += Math.pow(referenceValue - decodedPixelDataAll[i], 2);
-                if (Math.abs(referenceValue - decodedPixelDataAll[i]) > maxErr) {
-                    maxErr = Math.abs(referenceValue - decodedPixelDataAll[i]);
-                }
-            }
-        }
+console.log('time for decompression total', timeTotal/1000, 'seconds');
+console.log('time loading + decompression total', (t2-t1)/1000, 'seconds');
 
-        if (true) {
-            var buf = new Buffer(height * width * 2 * numFrames);
-            for (var i = 0; i < height * width * numFrames; i++) {
-                buf.writeInt16LE(decodedPixelDataAll[i], i * 2);
-            }
-            fs.writeFileSync('./test/out_' + filename + '.raw', buf);
-        }
-    }
-    else{
-        for (var i = 0; i < height * width * numFrames; i++) {
+//load reference raw file
+var referenceFileAsBuffer = fs.readFileSync('./' + filename + '.raw');
+console.log('Raw image buffer length (bytes): ', referenceFileAsBuffer.length);
+
+//compare pixel by pixel
+var numDiff = 0;
+var cumDiff = 0;
+var maxErr = 0;
+var bytesPerPixel = 2;
+if(bitsAllocated == '16')
+    bytesPerPixel = 2;
+else if (bitsAllocated == '8')
+    bytesPerPixel = 1;
+else
+    throw('Uexpected BitsAllocated value! Aborting!')
+
+for (var i = 0; i < height * width * numFrames; i++) {
+    if(bytesPerPixel == 2)
+        referenceValue = referenceFileAsBuffer.readInt16LE(i * bytesPerPixel);
+    else
         referenceValue = referenceFileAsBuffer.readInt8(i);
-            if (Math.abs(referenceValue - decodedPixelDataAll[i]) > 0) {
-                numDiff++;
-                cumDiff += Math.pow(referenceValue - decodedPixelDataAll[i], 2);
-                if (Math.abs(referenceValue - decodedPixelDataAll[i]) > maxErr) {
-                    maxErr = Math.abs(referenceValue - decodedPixelDataAll[i]);
-                }
-            }
-        }
-
-        if (true) {
-            var buf = new Buffer(height * width * numFrames);
-            for (var i = 0; i < height * width * numFrames; i++) {
-                buf.writeInt8(decodedPixelDataAll[i], i);
-            }
-            fs.writeFileSync('./test/out_' + filename + '.raw', buf);
+    if (Math.abs(referenceValue - decodedPixelDataAll[i]) > 0) {
+        numDiff++;
+        cumDiff += Math.pow(referenceValue - decodedPixelDataAll[i], 2);
+        if (Math.abs(referenceValue - decodedPixelDataAll[i]) > maxErr) {
+            maxErr = Math.abs(referenceValue - decodedPixelDataAll[i]);
         }
     }
+}
 
-    var numSamples = (height * width * numFrames);
+if (true) {
+    var buf = new Buffer(height * width * bytesPerPixel * numFrames);
+    for (var i = 0; i < height * width * numFrames; i++) {
+        if(bytesPerPixel == 2)
+            buf.writeInt16LE(decodedPixelDataAll[i], i * bytesPerPixel);
+        else
+            buf.writeInt8(decodedPixelDataAll[i], i * bytesPerPixel);
+    }
+    fs.writeFileSync('./test/out_' + filename + '.raw', buf);
+}
+
+var numSamples = (height * width * numFrames);
 
 console.log((lossless ? maxErr === 0 : maxErr <= 1), numDiff + ' / ' + numSamples + ' degraded pixels, MSE=' + cumDiff / numSamples + ' Max err= ' + maxErr)
 
 function readMultiframeImagePositionPatient(dataset) {
-    console.log('--- Enhanced CT Image Storage');
     var options = { omitPrivateAttibutes :false , maxElementLength: 128 };
     var instance = dicomParser.explicitDataSetToJS(dataSet, options);
     var perFrameSeq = instance.x52009230; // PerFrameFunctionalGroupsSequence
@@ -160,8 +144,11 @@ function readMultiframeImagePositionPatient(dataset) {
     dcmColumns = parseFloat(instance.x00280011); //Columns;
     dcmNumFrames = parseFloat(instance.x00280008); //NumberOfFrames;
     xyzSize = [dcmColumns,dcmRows,dcmNumFrames]; // Rows -> y ; Columns -> x;
-    console.log('origin:', originMm, 'xyzSpacing:', xyzPixelSpacing, 'xyzSize:', xyzSize);
-    var a = 0;
+    return {
+        originMm: originMm,
+        size: xyzSize,
+        spacingMm: xyzPixelSpacing,
+    };
 }
 
 function isValidRxDicom(dataset) {
