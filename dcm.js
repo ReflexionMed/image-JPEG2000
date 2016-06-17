@@ -4,17 +4,25 @@ var fs = require('fs');
 var vm = require('vm');
 var _ = require('underscore');
 var math = require('mathjs');
-var dicomParser = require('./node_modules/dicom-parser/dist/dicomParser');
+global.dicomParser = require('./node_modules/dicom-parser/dist/dicomParser');
 vm.runInThisContext(fs.readFileSync('./dist/jpx.js', 'utf8') + '');
 
-var filename = "ct";
+// some global vars inits here to make WADOImage loader work
+vm.runInThisContext(fs.readFileSync('./trickCornerstoneWADOImageLoader.js', 'utf8') + '');
+vm.runInThisContext(fs.readFileSync('./node_modules/cornerstone-wado-image-loader/dist/cornerstoneWADOImageLoader.js', 'utf8') + '');
+// this resolves tag string uids to human readable format
+vm.runInThisContext(fs.readFileSync('./dicom-uids.js', 'utf8') + '');
+
+csWadoUtils = cornerstoneWADOImageLoader;
+
+var filename = "ct16bitRLE";
 if (process.argv[2])
     filename = process.argv[2];
-console.log('filename: ', filename);
+console.log('*** Filename: ', filename);
 
 var lossless = 0;
 var t1 = Date.now();
-    //load dicom file using
+    // load dicom file using
     var dicomFileAsBuffer = fs.readFileSync('./' + filename + '.dcm');
     var dicomFileAsByteArray = new Uint8Array(dicomFileAsBuffer);
     var dataSet = dicomParser.parseDicom(dicomFileAsByteArray);
@@ -24,46 +32,39 @@ var t1 = Date.now();
     var bitsAllocated = instance.x00280101; //uint8 or uint16 -> 8 or 16
     var rows = instance.x00280010;
     var columns = instance.x00280011;
-    console.log('bitsAllocated: ', bitsAllocated, 'rows: ', rows, 'columns', columns);
+    console.log('   *** BitsAllocated ', bitsAllocated, 'rows: ', rows, 'columns', columns);
+    console.log('      *** Compression ***', global.uids[dataSet.string('x00020010')]);
+    console.log('      *** SOPClassUID ***', global.uids[dataSet.string('x00080016')]);
 
 //isValidRxDicom(dataSet);
 
 if (isEnhancedCT(dataSet)){
     var header = readMultiframeImagePositionPatient(dataSet);
-    console.log('--- Parsing Enhanced CT Image Storage \n', header, '\n ---');
+    console.log(header);
+    // console.log('--- Parsing Enhanced CT Image Storage \n', header, '\n ---');
 }
 
 //Extract embedded JPEG2000 stream
 var framePixelData = dataSet.elements.x7fe00010;
-var jpxDataAll = [];
 var numFrames = framePixelData.fragments.length;
-for(var i = 0; i < framePixelData.fragments.length; i++){
-    jpxDataAll.push(
-            dicomFileAsByteArray.subarray(framePixelData.fragments[i].position,
-                framePixelData.fragments[i].position + 
-                framePixelData.fragments[i].length)
-        );
-}
+
 var decodedPixelDataAll = new Uint16Array(rows*columns*numFrames);
 var timeTotal = 0;
+var height = rows;
+var width = columns; 
 for(var j = 0; j < numFrames; j++){
-    var jpxData = jpxDataAll[j];
+    // var jpxData = jpxDataAll[j];
     //decode JPEG2000 steam
-    var jpxImage = new global.JpxImage();
     var startTime = Date.now();
-    jpxImage.parse(jpxData);
+    var decodedPixelData = csWadoUtils.decodeTransferSyntax(dataSet,j);
     var endTime = Date.now();
-    var tileComponents = jpxImage.tiles[0];
-    var decodedPixelData = tileComponents.items;
-    var height = jpxImage.height;
-    var width = jpxImage.width;
     var j2kDecodeTime = (endTime - startTime);
     timeTotal += j2kDecodeTime;
     decodedPixelDataAll.set(decodedPixelData, j*height*width);
 }
 var t2 = Date.now();
-console.log('time for decompression total', timeTotal/1000, 'seconds');
-console.log('time loading + decompression total', (t2-t1)/1000, 'seconds');
+console.log('   *** Total decompression time ***', timeTotal/1000, 'seconds');
+console.log('   *** Total time loading + decompression ***', (t2-t1)/1000, 'seconds');
 
 //load reference raw file
 var referenceFileAsBuffer = fs.readFileSync('./' + filename + '.raw');
@@ -79,7 +80,7 @@ if(bitsAllocated == '16')
 else if (bitsAllocated == '8')
     bytesPerPixel = 1;
 else
-    throw('Uexpected BitsAllocated value! Aborting!')
+    throw('Uexpected BitsAllocated value! Aborting!');
 
 for (var i = 0; i < height * width * numFrames; i++) {
     if(bytesPerPixel == 2)
